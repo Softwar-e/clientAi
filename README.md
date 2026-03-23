@@ -10,7 +10,32 @@ View your app in AI Studio: https://ai.studio/apps/ab341769-2fd8-481f-a79c-d880d
 
 ## Run Locally
 
-**Prerequisites:** [Node.js](https://nodejs.org/) (v18 or later)
+### Prerequisites: Install Node.js
+
+`npm` ships with Node.js. If running `node -v` or `npm -v` in your terminal shows "command not found", install Node.js first:
+
+- **macOS (recommended):** Install via [Homebrew](https://brew.sh/):
+  ```bash
+  brew install node
+  ```
+  Or download the macOS installer from [nodejs.org](https://nodejs.org/).
+
+- **Windows:** Download the installer from [nodejs.org](https://nodejs.org/).
+
+- **Linux:** Use your distro's package manager, e.g.:
+  ```bash
+  sudo apt install nodejs npm   # Debian/Ubuntu
+  ```
+
+Verify the install succeeded before continuing:
+```bash
+node -v   # should print v18 or higher
+npm -v
+```
+
+---
+
+### Setup
 
 1. **Install dependencies:**
    ```bash
@@ -29,4 +54,4 @@ View your app in AI Studio: https://ai.studio/apps/ab341769-2fd8-481f-a79c-d880d
    ```bash
    npm run dev
    ```
-   The app will be available at [http://localhost:3000](http://localhost:3000).
+   Open [http://localhost:3000](http://localhost:3000) in your browser.
