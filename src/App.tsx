@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import React, { useState } from 'react';
 import { GoogleGenAI, Type } from '@google/genai';
 import { Send, Copy, Check, Sparkles, User, Briefcase, Target, AlertCircle, ImagePlus, X } from 'lucide-react';
 import { motion } from 'motion/react';
