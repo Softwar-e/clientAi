@@ -4,7 +4,9 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --port=3000 --host=0.0.0.0",
+    "dev": "cd scraper && /opt/homebrew/bin/go run . & vite --port=3000 --host=0.0.0.0",
+    "dev:client": "vite --port=3000 --host=0.0.0.0",
+    "dev:server": "cd scraper && /opt/homebrew/bin/go run .",
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist",

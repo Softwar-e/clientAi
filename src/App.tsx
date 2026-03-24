@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { GoogleGenAI, Type } from '@google/genai';
-import { Send, Copy, Check, Sparkles, User, Briefcase, Target, AlertCircle, ImagePlus, X } from 'lucide-react';
+import { Send, Copy, Check, Sparkles, User, Briefcase, Target, AlertCircle, ImagePlus, X, Loader2 } from 'lucide-react';
 import { motion } from 'motion/react';
 
 // Initialize Gemini API
@@ -21,6 +21,26 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [linkedinUrl, setLinkedinUrl] = useState('');
+  const [isFetching, setIsFetching] = useState(false);
+  const [recipientEmail, setRecipientEmail] = useState('');
+
+  const fetchLinkedInProfile = async () => {
+    if (!linkedinUrl.trim()) return;
+    setIsFetching(true);
+    setError('');
+    try {
+      const res = await fetch(`/api/scrape-linkedin?url=${encodeURIComponent(linkedinUrl)}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to fetch profile');
+      setProfileData(data.profileText);
+      if (data.email) setRecipientEmail(data.email);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setIsFetching(false);
+    }
+  };
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -40,8 +60,8 @@ export default function App() {
   };
 
   const handleGenerate = async () => {
-    if (!profileData.trim() || !product.trim()) {
-      setError('Please provide both profile details and your product/service.');
+    if (!linkedinUrl.trim() || !product.trim()) {
+      setError('Please provide a LinkedIn URL and your product/service.');
       return;
     }
 
@@ -49,32 +69,84 @@ export default function App() {
     setError('');
     setResult(null);
 
-    try {
-      const prompt = `
-You are an expert B2B sales copywriter and growth hacker. Your job is to write highly personalized, conversion-optimized cold emails for a sales team.
+    // Auto-fetch LinkedIn profile before generating
+    let profile = profileData.trim();
+    if (!profile && linkedinUrl.trim()) {
+      try {
+        const res = await fetch(`/api/scrape-linkedin?url=${encodeURIComponent(linkedinUrl)}`);
+        const data = await res.json();
+        if (res.ok && data.profileText) {
+          // Decode HTML entities that may come from scraped content
+          const txt = data.profileText
+            .replace(/&amp;/g, '&')
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&quot;/g, '"')
+            .replace(/&#39;/g, "'")
+            .replace(/\[Note:.*?\]/gs, '')
+            .trim();
+          profile = txt;
+          setProfileData(profile);
+          if (data.email) setRecipientEmail(data.email);
+        }
+      } catch {
+        // LinkedIn blocked — proceed with just the URL
+      }
+    }
+    const effectiveProfile = profile || `LinkedIn profile: ${linkedinUrl.trim()}`;
 
-Here is the context:
-Profile URL or Text: ${profileData}
+    const isProfileBlocked = effectiveProfile.startsWith('LinkedIn profile:') && !effectiveProfile.includes('\n');
+
+    try {
+      const prompt = isProfileBlocked
+        ? `
+You are a B2B sales copywriter writing a cold email.
+
+IMPORTANT: You have NO information about this prospect. Their LinkedIn profile could not be accessed.
+Do NOT invent any name, job title, company, or personal details whatsoever.
+Write a short, generic cold email addressed to "there" or with no personal greeting at all.
+Mention only the product/service and a clear CTA. Keep it under 100 words.
+
+Product/Service being sold: ${product}
+${painPoint ? `Pain point to address: ${painPoint}` : ''}
+
+OUTPUT FORMAT — return ONLY a JSON object:
+- "subject": 3-7 word subject line
+- "body": Email body (use \\n for line breaks, NO HTML tags, NO invented names or companies)
+- "ps": empty string
+- "explanation": "LinkedIn profile was not accessible — wrote a generic email without personal details."
+`
+        : `
+You are an elite B2B sales copywriter specialising in job-role-driven cold outreach.
+
+Here is the ONLY information you have about the prospect. Do NOT invent, assume, or add any details not explicitly present below — no company names, locations, titles, or facts that are not stated:
+
+--- PROSPECT PROFILE START ---
+${effectiveProfile}
+--- PROSPECT PROFILE END ---
+
 Product/Service being sold: ${product}
 ${painPoint ? `Specific pain point to target: ${painPoint}` : ''}
-${imageFile ? `*Note: An image of the product/service has also been provided. Use any relevant visual details from it to enhance the pitch if applicable.*` : ''}
+${imageFile ? `*Note: An image of the product/service has also been provided.*` : ''}
 
-1. EXTRACT CONTEXT from the provided profile details (name, job title, company, industry, recent posts, bio, etc.).
-2. WRITE A COLD EMAIL that:
-   - Opens with a hyper-personalized hook referencing something specific from their profile.
-   - Clearly but subtly introduces the product/service being sold.
-   - Communicates a concrete value proposition relevant to THEIR specific role and industry.
-   - Includes a low-friction CTA (e.g., a 15-min call, a reply, a free trial link).
-   - Is under 150 words — punchy, human, never salesy.
-   - Sounds like it was written by a real person, not a robot.
+INSTRUCTIONS:
+1. Read the profile. Identify the person's actual name, job title, company, and any details explicitly mentioned.
+2. Write a cold email that:
+   - Addresses them by first name only.
+   - References only their ACTUAL role/company/details from the profile above — never invent anything.
+   - Connects the product/service to a real pressure someone in that role faces.
+   - Ends with a low-friction CTA (15-min call, a reply, etc.).
+   - Is under 150 words. Human, peer-to-peer, never salesy.
+   - Uses plain text only — NO HTML tags like <br>.
+3. If the profile has limited info, keep it grounded in what IS there.
 
-TONE: Confident, warm, peer-to-peer. Never use phrases like "I hope this email finds you well", "I wanted to reach out", or "synergy".
+TONE: Direct, warm, credible. Avoid: "I hope this finds you well", "I wanted to reach out", "synergy", "game-changer".
 
-OUTPUT FORMAT: Return a JSON object with the following keys:
-- "subject": Subject line (3–7 words, curiosity-inducing)
-- "body": The email body (use \n for line breaks)
-- "ps": Optional P.S. line (a powerful conversion trick, leave empty if not applicable)
-- "explanation": 1-sentence explanation of WHY you wrote it this way
+OUTPUT FORMAT — return ONLY a JSON object:
+- "subject": 3-7 word subject line
+- "body": Email body (use \\n for line breaks, NO HTML tags)
+- "ps": Optional P.S. line, empty string if not needed
+- "explanation": 1 sentence — which specific profile fact drove your angle
 `;
 
       const parts: any[] = [{ text: prompt }];
@@ -120,7 +192,8 @@ OUTPUT FORMAT: Return a JSON object with the following keys:
 
   const copyToClipboard = () => {
     if (!result) return;
-    const text = `Subject: ${result.subject}\n\n${result.body}${result.ps ? `\n\nP.S. ${result.ps}` : ''}`;
+    const toLine = recipientEmail ? `To: ${recipientEmail}\n` : '';
+    const text = `${toLine}Subject: ${result.subject}\n\n${result.body}${result.ps ? `\n\nP.S. ${result.ps}` : ''}`;
     navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
@@ -155,12 +228,34 @@ OUTPUT FORMAT: Return a JSON object with the following keys:
                   <User className="w-4 h-4 text-slate-400" />
                   Prospect Profile
                 </label>
-                <textarea
-                  value={profileData}
-                  onChange={(e) => setProfileData(e.target.value)}
-                  placeholder="Paste LinkedIn/Instagram URL or profile details (bio, recent posts, role)..."
-                  className="w-full h-32 px-4 py-3 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all resize-none text-sm outline-none"
-                />
+                <div className="flex gap-2">
+                  <input
+                    type="url"
+                    value={linkedinUrl}
+                    onChange={(e) => { setLinkedinUrl(e.target.value); setProfileData(''); setRecipientEmail(''); }}
+                    placeholder="https://linkedin.com/in/username"
+                    className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all text-sm outline-none"
+                  />
+                  {isFetching && <Loader2 className="w-4 h-4 animate-spin text-slate-400 mt-2.5 shrink-0" />}
+                </div>
+                {recipientEmail ? (
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-slate-500 uppercase tracking-wide">Email found</label>
+                    <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-100 px-3 py-2 rounded-xl">
+                      <Check className="w-4 h-4 text-emerald-500 shrink-0" />
+                      <span className="text-sm font-medium text-emerald-800 truncate">{recipientEmail}</span>
+                    </div>
+                  </div>
+                ) : result && (
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-slate-500 uppercase tracking-wide">Email</label>
+                    <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 px-3 py-2 rounded-xl">
+                      <AlertCircle className="w-4 h-4 text-slate-400 shrink-0" />
+                      <span className="text-sm text-slate-400">Could not find email address</span>
+                    </div>
+                  </div>
+                )}
+
               </div>
 
               {/* Product Input */}
@@ -228,7 +323,7 @@ OUTPUT FORMAT: Return a JSON object with the following keys:
 
               <button
                 onClick={handleGenerate}
-                disabled={isGenerating || !profileData.trim() || !product.trim()}
+                disabled={isGenerating || isFetching || !linkedinUrl.trim() || !product.trim()}
                 className="w-full flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white font-medium py-3 px-4 rounded-xl transition-colors cursor-pointer disabled:cursor-not-allowed"
               >
                 {isGenerating ? (
@@ -254,31 +349,73 @@ OUTPUT FORMAT: Return a JSON object with the following keys:
                 animate={{ opacity: 1, y: 0 }}
                 className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden"
               >
-                <div className="border-b border-slate-100 bg-slate-50/50 p-4 flex items-center justify-between">
-                  <div className="flex items-center gap-2">
+                {/* Product photo hero — shown when an image was attached */}
+                {imagePreview && (
+                  <div className="relative w-full h-52 overflow-hidden">
+                    <img
+                      src={imagePreview}
+                      alt="Product"
+                      className="w-full h-full object-cover"
+                    />
+                    <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-black/10 to-transparent" />
+                    <div className="absolute bottom-4 left-5 right-5">
+                      <p className="text-white/70 text-xs uppercase tracking-widest mb-1">Subject</p>
+                      <p className="text-white text-lg font-semibold drop-shadow leading-snug">{result.subject}</p>
+                    </div>
+                    <button
+                      onClick={copyToClipboard}
+                      className="absolute top-3 right-3 flex items-center gap-1.5 text-sm font-medium text-white bg-white/20 hover:bg-white/30 backdrop-blur-sm border border-white/30 px-3 py-1.5 rounded-lg transition-colors cursor-pointer"
+                    >
+                      {copied ? <Check className="w-4 h-4 text-emerald-300" /> : <Copy className="w-4 h-4" />}
+                      {copied ? 'Copied!' : 'Copy'}
+                    </button>
+                  </div>
+                )}
+
+                {/* Header bar — only shown when no image */}
+                {!imagePreview && (
+                  <div className="border-b border-slate-100 bg-slate-50/50 p-4 flex items-center justify-between">
                     <span className="text-xs font-medium uppercase tracking-wider text-slate-500">Generated Email</span>
+                    <button
+                      onClick={copyToClipboard}
+                      className="flex items-center gap-1.5 text-sm font-medium text-slate-600 hover:text-indigo-600 transition-colors bg-white border border-slate-200 px-3 py-1.5 rounded-lg shadow-sm cursor-pointer"
+                    >
+                      {copied ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
+                      {copied ? 'Copied!' : 'Copy'}
+                    </button>
                   </div>
-                  <button
-                    onClick={copyToClipboard}
-                    className="flex items-center gap-1.5 text-sm font-medium text-slate-600 hover:text-indigo-600 transition-colors bg-white border border-slate-200 px-3 py-1.5 rounded-lg shadow-sm cursor-pointer"
-                  >
-                    {copied ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
-                    {copied ? 'Copied!' : 'Copy'}
-                  </button>
-                </div>
-                
+                )}
+
                 <div className="p-6 space-y-6">
-                  <div>
-                    <p className="text-sm font-medium text-slate-500 mb-1">Subject</p>
-                    <p className="text-lg font-semibold text-slate-900">{result.subject}</p>
-                  </div>
+                  {/* To field — shown when email was found */}
+                  {recipientEmail && (
+                    <div>
+                      <p className="text-sm font-medium text-slate-500 mb-1">To</p>
+                      <p className="text-base text-slate-900">{recipientEmail}</p>
+                    </div>
+                  )}
+
+                  {/* Subject — only shown when no image (image hero shows it) */}
+                  {!imagePreview && (
+                    <div>
+                      <p className="text-sm font-medium text-slate-500 mb-1">Subject</p>
+                      <p className="text-lg font-semibold text-slate-900">{result.subject}</p>
+                    </div>
+                  )}
                   
                   <div>
                     <p className="text-sm font-medium text-slate-500 mb-2">Body</p>
                     <div className="prose prose-slate prose-sm max-w-none">
-                      <p className="whitespace-pre-wrap text-slate-700 leading-relaxed text-base">{result.body}</p>
+                      <p className="whitespace-pre-wrap text-slate-700 leading-relaxed text-base">{result.body.replace(/<br\s*\/?>/gi, '\n').replace(/\n\n+/g, '\n\n').trim()}</p>
                     </div>
                   </div>
+
+                  {/* Product image inline in email body */}
+                  {imagePreview && (
+                    <div className="rounded-xl overflow-hidden border border-slate-100 shadow-sm">
+                      <img src={imagePreview} alt="Product" className="w-full object-cover max-h-64" />
+                    </div>
+                  )}
 
                   {result.ps && (
                     <div className="bg-amber-50 border border-amber-100 rounded-xl p-4">
