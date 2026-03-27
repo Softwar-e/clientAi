@@ -45,6 +45,7 @@ type response struct {
 	Error       string `json:"error,omitempty"`
 	Partial     bool   `json:"partial,omitempty"`
 	Email       string `json:"email,omitempty"`
+	Debug       string `json:"debug,omitempty"`
 }
 
 func walkNodes(n *html.Node, fn func(*html.Node)) {
@@ -211,15 +212,15 @@ func scrapeLinkedIn(w http.ResponseWriter, r *http.Request) {
 
 	meta := extractMeta(doc)
 	pageTitle := extractTitle(doc)
-	var jsonLDs []map[string]any
+	// Always extract JSON-LD and embedded data — LinkedIn includes these even on restricted pages
+	jsonLDs := extractJSONLD(doc)
 	var embedded map[string]any
 	if !blocked {
-		jsonLDs = extractJSONLD(doc)
 		embedded = extractEmbeddedProfile(doc)
 	}
 
 	var lines []string
-	var extractedName, extractedCompany, extractedWebsite string
+	var extractedName, extractedWebsite string
 
 	// Name + headline from og:title format: "First Last - Headline | LinkedIn"
 	ogTitle := meta["og:title"]
@@ -234,10 +235,6 @@ func scrapeLinkedIn(w http.ResponseWriter, r *http.Request) {
 		if len(parts) > 1 {
 			headline := strings.TrimSpace(parts[1])
 			lines = append(lines, "Headline: "+headline)
-			// Extract company from "Title at Company" pattern
-			if atIdx := strings.Index(strings.ToLower(headline), " at "); atIdx >= 0 {
-				extractedCompany = strings.TrimSpace(headline[atIdx+4:])
-			}
 		}
 	}
 
@@ -285,6 +282,17 @@ func scrapeLinkedIn(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// For all pages (including blocked) — extract website from LinkedIn redirect links in HTML
+	// LinkedIn encodes external links as /redir/redirect?url=https%3A%2F%2Fexample.com...
+	if extractedWebsite == "" {
+		extractedWebsite = extractWebsiteFromLinks(doc)
+	}
+
+	// Last resort: scan raw HTML text for bare URLs near website-related keywords
+	if extractedWebsite == "" {
+		extractedWebsite = extractWebsiteFromText(bodyStr)
+	}
+
 	// Embedded JSON (best case — LinkedIn server-side renders some profile data)
 	if embedded != nil {
 		if fn := strVal(embedded, "firstName"); fn != "" && !strings.Contains(strings.Join(lines, ""), "Name:") {
@@ -311,6 +319,9 @@ func scrapeLinkedIn(w http.ResponseWriter, r *http.Request) {
 
 	lines = append(lines, "\n[Note: LinkedIn limits public scraping — full work history requires manual paste.]")
 
+	var debugLog []string
+	debugLog = append(debugLog, fmt.Sprintf("blocked=%v", blocked))
+
 	foundEmail := ""
 
 	// Priority 1: LinkedIn internal contact-info API (needs session cookie)
@@ -322,27 +333,108 @@ func scrapeLinkedIn(w http.ResponseWriter, r *http.Request) {
 			if site != "" {
 				extractedWebsite = site
 			}
+			debugLog = append(debugLog, fmt.Sprintf("voyager_email=%q voyager_site=%q", email, site))
 		}
+	} else {
+		debugLog = append(debugLog, "no LINKEDIN_COOKIE")
 	}
 
-	// Priority 2: scrape the lead's personal/company website for an email
-	if foundEmail == "" {
-		websiteToScrape := extractedWebsite
-		if websiteToScrape == "" && extractedCompany != "" {
-			if d := findCompanyDomain(extractedCompany); d != "" {
-				websiteToScrape = "https://" + d
-			}
-		}
-		if websiteToScrape != "" {
-			foundEmail = scrapeWebsiteForEmail(websiteToScrape)
-		}
+	debugLog = append(debugLog, fmt.Sprintf("extractedWebsite=%q", extractedWebsite))
+
+	// Priority 2: scrape the website explicitly listed on the profile
+	if foundEmail == "" && extractedWebsite != "" {
+		foundEmail = scrapeWebsiteForEmail(extractedWebsite)
+		debugLog = append(debugLog, fmt.Sprintf("website_scrape_email=%q", foundEmail))
 	}
 
 	writeJSON(w, http.StatusOK, response{
 		ProfileText: strings.Join(lines, "\n"),
 		Partial:     true,
 		Email:       foundEmail,
+		Debug:       strings.Join(debugLog, "; "),
 	})
+}
+
+// extractWebsiteFromText scans raw HTML text for bare website URLs (e.g. "www.kalemi.com")
+// that appear near website-related keywords. Handles profiles where the URL is rendered
+// as plain text rather than in an <a> tag.
+func extractWebsiteFromText(body string) string {
+	// Match bare domains: www.example.com or https://example.com
+	urlRe := regexp.MustCompile(`(?i)(?:https?://|www\.)[a-zA-Z0-9\-]+(?:\.[a-zA-Z0-9\-]+)+(?:/[^\s"'<>]*)?`)
+	matches := urlRe.FindAllStringIndex(body, -1)
+	for _, idx := range matches {
+		raw := body[idx[0]:idx[1]]
+		// Normalise to full URL
+		if !strings.HasPrefix(raw, "http") {
+			raw = "https://" + raw
+		}
+		// Skip LinkedIn's own domains and common noise
+		if strings.Contains(raw, "linkedin.com") ||
+			strings.Contains(raw, "schema.org") ||
+			strings.Contains(raw, "javascript.") ||
+			strings.Contains(raw, "w3.org") ||
+			strings.Contains(raw, "google.com") ||
+			strings.Contains(raw, "facebook.com") ||
+			strings.Contains(raw, "twitter.com") ||
+			strings.Contains(raw, "apple.com") ||
+			strings.Contains(raw, "microsoft.com") {
+			continue
+		}
+		// Only pick URLs that appear close to a website-related keyword in the surrounding context
+		start := idx[0] - 200
+		if start < 0 {
+			start = 0
+		}
+		end := idx[1] + 200
+		if end > len(body) {
+			end = len(body)
+		}
+		context := strings.ToLower(body[start:end])
+		if strings.Contains(context, "website") ||
+			strings.Contains(context, "websiteLabel") ||
+			strings.Contains(context, "\"url\"") ||
+			strings.Contains(context, "contact") ||
+			strings.Contains(context, "homepage") {
+			return raw
+		}
+	}
+	return ""
+}
+
+// extractWebsiteFromLinks scans all <a> tags for LinkedIn's external redirect links
+// (format: /redir/redirect?url=https%3A%2F%2Fexample.com) and returns the first
+// non-LinkedIn external URL found. This works on both full and blocked pages.
+func extractWebsiteFromLinks(doc *html.Node) string {
+	var found string
+	walkNodes(doc, func(n *html.Node) {
+		if found != "" || n.Type != html.ElementNode || n.Data != "a" {
+			return
+		}
+		href := getAttr(n, "href")
+		if href == "" {
+			return
+		}
+		// LinkedIn wraps external links as /redir/redirect?url=...
+		if strings.Contains(href, "/redir/redirect") || strings.Contains(href, "/redir/external-link") {
+			parsed, err := url.Parse(href)
+			if err != nil {
+				return
+			}
+			external := parsed.Query().Get("url")
+			if external == "" {
+				return
+			}
+			// Decode and validate
+			decoded, err := url.QueryUnescape(external)
+			if err != nil {
+				return
+			}
+			if strings.HasPrefix(decoded, "http") && !strings.Contains(decoded, "linkedin.com") {
+				found = decoded
+			}
+		}
+	})
+	return found
 }
 
 // extractProfileSlug pulls the username from a /in/username LinkedIn URL.
@@ -503,26 +595,6 @@ func fetchEmailFromPage(client *http.Client, pageURL string) string {
 		}
 	})
 	return textEmail
-}
-
-// findCompanyDomain uses Clearbit's free autocomplete API (no API key required)
-// to resolve a company name to its primary domain.
-func findCompanyDomain(company string) string {
-	reqURL := fmt.Sprintf("https://autocomplete.clearbit.com/v1/companies/suggest?query=%s", url.QueryEscape(company))
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(reqURL)
-	if err != nil {
-		return ""
-	}
-	defer resp.Body.Close()
-	var results []map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil || len(results) == 0 {
-		return ""
-	}
-	if domain, ok := results[0]["domain"].(string); ok {
-		return domain
-	}
-	return ""
 }
 
 func joinNonEmpty(sep string, parts ...string) string {

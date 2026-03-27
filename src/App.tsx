@@ -88,6 +88,7 @@ export default function App() {
           profile = txt;
           setProfileData(profile);
           if (data.email) setRecipientEmail(data.email);
+          if (data.debug) console.log('[scraper debug]', data.debug);
         }
       } catch {
         // LinkedIn blocked — proceed with just the URL
@@ -161,10 +162,11 @@ OUTPUT FORMAT — return ONLY a JSON object:
         });
       }
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
-        contents: { parts },
-        config: {
+      const generateWithModel = async (model: string) => {
+        return ai.models.generateContent({
+          model,
+          contents: { parts },
+          config: {
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
@@ -178,6 +180,22 @@ OUTPUT FORMAT — return ONLY a JSON object:
           },
         },
       });
+      };
+
+      // Try primary model, retry once after a delay, then fall back to stable model
+      let response;
+      try {
+        response = await generateWithModel('gemini-2.5-flash-preview-05-20');
+      } catch (e: any) {
+        if (e?.message?.includes('429') || e?.message?.includes('RESOURCE_EXHAUSTED')) {
+          await new Promise(r => setTimeout(r, 2000));
+        }
+        try {
+          response = await generateWithModel('gemini-2.0-flash');
+        } catch {
+          throw new Error('Gemini API quota exceeded. Please wait a few minutes and try again, or upgrade your API plan at https://ai.google.dev.');
+        }
+      }
 
       const jsonStr = response.text?.trim() || '{}';
       const parsed = JSON.parse(jsonStr);
